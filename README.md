@@ -1,1 +1,5 @@
 # Impulsa360_PlayStore
+
+## AAB disponible
+- Archivo: releases/impulsa360-com.integrat360.impulsa360-v1.0.12-code19-16kbfix-20260223-011908.aab
+- SHA256: b12974fc064c5eabce8e758280e1894d03b289ef8bf4ce4aa766a3cbc2e717f5
