@@ -19,6 +19,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import { v4 as uuidv4 } from 'uuid';
 import { guardarFormularioLocal } from '../lib/storage';
+import { prepararImagenPersistente } from '../lib/upload';
 import { normalizarNombreVisible } from '../lib/identity';
 import { colors, spacing, fontSizes, radius, shadow } from '../styles/theme';
 
@@ -49,6 +50,8 @@ const TIPOS_MERCADOS = [
 
 const TAMANOS_TIENDA = ['Pequeña', 'Mediana', 'Grande'];
 const TIPOS_COMERCIO = ['Comercio', 'Hogar y Muebles', 'Transporte y Servicio', 'Cuidado Personal y Belleza', 'Educación y Entretenimiento', 'Consumo'];
+const RUBROS_COMERCIO = ['Comercio', 'Servicios Profesionales', 'Servicio de transporte', 'Servicio de Comida', 'Manufactura Artesanal', 'Ambulantes', 'Servicios Personales', 'Reparación de Vehículos', 'Otro'];
+const TIPOS_ERROR = ['Conectividad', 'Aplicación', 'Registro', 'Cash-In', 'Otro'];
 
 const CIUDADES = [
   {
@@ -301,13 +304,6 @@ const resolverCiudadKey = (valor = '') => {
   return porLabel?.key || '';
 };
 
-const extraerExtension = (uri = '') => {
-  const limpio = String(uri).split('?')[0].split('#')[0];
-  const nombre = limpio.split('/').pop() || '';
-  const ext = nombre.includes('.') ? nombre.split('.').pop().toLowerCase() : '';
-  return /^[a-z0-9]{2,5}$/.test(ext) ? ext : 'jpg';
-};
-
 const formularioInicial = {
   tipo_grupo: '',
   tipo_activacion: '',
@@ -331,11 +327,19 @@ const formularioInicial = {
   respaldo: false,
   hubo_error: false,
   descripcion_error: '',
+  tipo_error: '',
   latitud: null,
   longitud: null,
   base_activacion: '',
   es_reactivacion: false,
   foto_url: '',
+  foto_cash_in: '',
+  tipo_tienda: '',
+  rubro_comercio: '',
+  rubro_comercio_otro: '',
+  comercio_fuera_mercado: null,
+  es_plaza_temporal: false,
+  plaza_temporal: null,
   estado_sync: 'offline_pending',
   dispositivo: DEVICE_INFO,
 };
@@ -349,7 +353,8 @@ export default function FormularioActivacion({
 }) {
   const [formulario, setFormulario] = useState(formularioInicial);
   const [fotoPrincipal, setFotoPrincipal] = useState(null);
-  const [detectandoCiudad, setDetectandoCiudad] = useState(false);
+  const [fotoCashIn, setFotoCashIn] = useState(null);
+  const [detectandoCiudad, setDetectandoCiudad] = useState(isConnected !== false);
   const { width } = useWindowDimensions();
   const imagenComercioWidth = Math.max(200, Math.min(width - spacing.lg * 2, 720));
   const imagenComercioHeight = Math.round(imagenComercioWidth / (16 / 9));
@@ -407,8 +412,30 @@ export default function FormularioActivacion({
   const requiereTamano = formulario.tipo_grupo === 'tienda_barrio'
     && ['comercio', 'reactivacion'].includes(formulario.tipo_activacion);
 
-  const requiereFotos = formulario.tipo_activacion
-    && !['transeunte', 'reactivacion_transeunte'].includes(formulario.tipo_activacion);
+  const requiereFotos = true;
+  const esTiendaBarrio = formulario.tipo_grupo === 'tienda_barrio';
+  const esComercio = ['comercio', 'reactivacion_comercio'].includes(formulario.tipo_activacion);
+  const plazasTemporales = useMemo(
+    () => Array.isArray(usuario?.plazas_temporales) ? usuario.plazas_temporales : [],
+    [usuario?.plazas_temporales],
+  );
+  const plazaTemporalSeleccionada = plazasTemporales.find(
+    (item) => item?.nombre === formulario.plaza_temporal,
+  );
+  const plazaSeleccionada = formulario.es_plaza_temporal && plazaTemporalSeleccionada
+    ? `temporal:${plazaTemporalSeleccionada.id}`
+    : 'base';
+
+  const onPlazaChange = (value) => {
+    if (value === 'base') {
+      setFormulario((prev) => ({ ...prev, es_plaza_temporal: false, plaza_temporal: null }));
+      return;
+    }
+    const plazaId = String(value).replace(/^temporal:/, '');
+    const plaza = plazasTemporales.find((item) => item?.id === plazaId);
+    if (!plaza) return;
+    setFormulario((prev) => ({ ...prev, es_plaza_temporal: true, plaza_temporal: plaza.nombre }));
+  };
 
   const onGrupoChange = (grupo) => {
     setFormulario(prev => ({
@@ -417,6 +444,10 @@ export default function FormularioActivacion({
       tipo_activacion: '',
       tamano_tienda: '',
       tipo_comercio: '',
+      tipo_tienda: '',
+      rubro_comercio: '',
+      rubro_comercio_otro: '',
+      comercio_fuera_mercado: null,
     }));
   };
 
@@ -424,6 +455,9 @@ export default function FormularioActivacion({
     setFormulario(prev => ({
       ...prev,
       tipo_activacion: key,
+      ...(!['comercio', 'reactivacion_comercio'].includes(key)
+        ? { rubro_comercio: '', rubro_comercio_otro: '', comercio_fuera_mercado: null }
+        : {}),
     }));
   };
 
@@ -513,18 +547,6 @@ export default function FormularioActivacion({
     detectarCiudadPorGps({ silent: true });
   }, [detectarCiudadPorGps, formulario.ciudad_activacion, isConnected]);
 
-  const limpiarFotosSiNoSeUsan = () => {
-    if (!requiereFotos) {
-      setFotoPrincipal(null);
-      actualizarCampo('foto_url', '');
-    }
-  };
-
-  useEffect(() => {
-    limpiarFotosSiNoSeUsan();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requiereFotos]);
-
   const tomarFoto = async (setter, fieldName) => {
     try {
       const camPerm = await ImagePicker.requestCameraPermissionsAsync();
@@ -565,11 +587,11 @@ export default function FormularioActivacion({
       }
 
       // Persistimos la foto en documentDirectory para que no se pierda antes de sincronizar.
-      const baseDir = `${FileSystem.documentDirectory || FileSystem.cacheDirectory}activaciones-pendientes`;
-      await FileSystem.makeDirectoryAsync(baseDir, { intermediates: true });
-      const ext = extraerExtension(uri);
-      const destino = `${baseDir}/${fieldName}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
-      await FileSystem.copyAsync({ from: uri, to: destino });
+      const destino = await prepararImagenPersistente(uri, fieldName);
+      const anterior = formulario[fieldName];
+      if (/^file:\/\//i.test(anterior || '') && anterior !== destino) {
+        await FileSystem.deleteAsync(anterior, { idempotent: true }).catch(() => {});
+      }
 
       setter(destino);
       actualizarCampo(fieldName, destino);
@@ -578,6 +600,13 @@ export default function FormularioActivacion({
       console.error('❌ Error al tomar o subir imagen:', error);
       Alert.alert('Error crítico', `No se pudo procesar la imagen. ${error?.message || ''}`);
     }
+  };
+
+  const eliminarFoto = async (setter, fieldName) => {
+    const uri = formulario[fieldName];
+    if (/^file:\/\//i.test(uri || '')) await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+    setter(null);
+    actualizarCampo(fieldName, '');
   };
 
   const validar = (data = formulario) => {
@@ -604,14 +633,20 @@ export default function FormularioActivacion({
     if (requiereTipoComercio && !data.tipo_comercio) {
       return 'Selecciona el tipo de comercio.';
     }
+    if (esTiendaBarrio && !data.tipo_tienda) return 'Selecciona el tamaño de la tienda.';
+    if (esComercio && !data.rubro_comercio) return 'Selecciona el rubro del comercio.';
+    if (esComercio && data.comercio_fuera_mercado === null) return 'Indica si el comercio está fuera del mercado.';
+    if (esComercio && data.rubro_comercio === 'Otro' && !data.rubro_comercio_otro.trim()) return 'Especifica el otro rubro.';
+    if (data.hubo_error && !data.tipo_error) return 'Selecciona el tipo de error.';
+    if (data.hubo_error && data.tipo_error === 'Otro' && !data.descripcion_error.trim()) return 'Describe el error.';
+    if (data.es_plaza_temporal && !plazasTemporales.some((item) => item?.nombre === data.plaza_temporal)) return 'La plaza temporal seleccionada no está autorizada.';
 
     if (!data.fecha_activacion) {
       return 'No se pudo obtener la fecha de activación.';
     }
 
-    if (requiereFotos && Platform.OS !== 'web') {
-      if (!data.foto_url && !fotoPrincipal) return 'Debes cargar la foto principal (QR/comercio).';
-    }
+    if (!data.foto_url && !fotoPrincipal) return 'Debes cargar la foto de comprobación.';
+    if (!data.foto_cash_in && !fotoCashIn) return 'Debes cargar la foto del Cash-In.';
 
     return null;
   };
@@ -676,8 +711,11 @@ export default function FormularioActivacion({
         es_reactivacion: esReactivacion,
         usuario_id: usuario.id,
         impulsador: formularioConBasicos.impulsador,
-        plaza: formulario.ciudad_activacion,
+        plaza: formularioConBasicos.es_plaza_temporal
+          ? formularioConBasicos.plaza_temporal
+          : usuario.plaza,
         foto_url: formulario.foto_url || fotoPrincipal || null,
+        foto_cash_in: formulario.foto_cash_in || fotoCashIn || null,
         estado_sync: 'offline_pending',
         dispositivo: DEVICE_INFO,
       };
@@ -685,8 +723,6 @@ export default function FormularioActivacion({
       await guardarFormularioLocal(datosFormulario);
       Alert.alert('Guardado local', 'Formulario guardado localmente. ⏳');
       contarFormulariosLocales?.();
-      limpiarFotosSiNoSeUsan();
-
       setFormulario({
         ...formularioInicial,
         id: '',
@@ -696,6 +732,7 @@ export default function FormularioActivacion({
           : formularioConBasicos.ciudad_activacion,
       });
       setFotoPrincipal(null);
+      setFotoCashIn(null);
     } catch (err) {
       console.error('Error al guardar formulario:', err);
       Alert.alert('Error', err?.message ? err.message : 'No se pudo guardar el formulario.');
@@ -719,34 +756,67 @@ export default function FormularioActivacion({
           <View style={[styles.badge, styles.badgePrimary]}>
             <Text style={styles.badgeText}>Pendientes: {cantidadOffline}</Text>
           </View>
-          <View style={[styles.badge, requiereFotos ? styles.badgeAccent : styles.badgeNeutral]}>
-            <Text style={styles.badgeText}>{requiereFotos ? 'Requiere foto' : 'Sin foto'}</Text>
+          <View style={[styles.badge, styles.badgeAccent]}>
+            <Text style={styles.badgeText}>2 fotos obligatorias</Text>
           </View>
+          {!!formulario.fecha_activacion && (
+            <View style={[styles.badge, styles.badgeNeutral]}>
+              <Text style={styles.badgeText}>Fecha · {formulario.fecha_activacion}</Text>
+            </View>
+          )}
         </View>
       </View>
 
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Datos automáticos</Text>
-        <View style={styles.helperRow}>
-          <Text style={styles.helperLabel}>Ciudad</Text>
-          <Text style={styles.helperValue}>{ciudadLabel || '—'}</Text>
-        </View>
-        <View style={styles.helperRow}>
-          <Text style={styles.helperLabel}>Zona</Text>
-          <Text style={styles.helperValue}>{formulario.zona_activacion || '—'}</Text>
-        </View>
-        <View style={styles.helperRow}>
-          <Text style={styles.helperLabel}>Impulsador</Text>
-          <Text style={styles.helperValue}>{formulario.impulsador || usuario?.nombre || '—'}</Text>
-        </View>
-        <View style={styles.helperRow}>
-          <Text style={styles.helperLabel}>Fecha</Text>
-          <Text style={styles.helperValue}>{formulario.fecha_activacion || '—'}</Text>
-        </View>
+      <View style={[styles.card, styles.compactCard]}>
+        <Text style={styles.sectionTitle}>Ubicación</Text>
+        {isConnected === false ? (
+          <>
+            <Text style={styles.locationStatus}>Ubicación guardada para modo offline</Text>
+            <Text style={styles.label}>Ciudad de Activación</Text>
+            <Picker
+              selectedValue={formulario.ciudad_activacion}
+              onValueChange={(v) => setFormulario((prev) => ({ ...prev, ciudad_activacion: v, zona_activacion: '' }))}
+              style={styles.picker}
+            >
+              <Picker.Item label="Seleccionar..." value="" />
+              {CIUDADES.map((item) => <Picker.Item key={item.key} label={item.label} value={item.key} />)}
+            </Picker>
+          </>
+        ) : (
+          <>
+            <Text style={styles.locationStatus}>
+              {detectandoCiudad
+                ? 'Detectando ubicación...'
+                : ciudadLabel
+                  ? 'Ubicación obtenida'
+                  : 'No se pudo obtener ubicación'}
+            </Text>
+            {!!ciudadLabel && (
+              <View style={styles.locationSummary}>
+                <Text style={styles.helperLabel}>Ciudad detectada</Text>
+                <Text style={styles.helperValue}>{ciudadLabel}</Text>
+              </View>
+            )}
+            {zonasDisponibles.length === 1 && !!formulario.zona_activacion && (
+              <View style={styles.locationSummary}>
+                <Text style={styles.helperLabel}>Zona detectada</Text>
+                <Text style={styles.helperValue}>{formulario.zona_activacion}</Text>
+              </View>
+            )}
+            <TouchableOpacity
+              style={[styles.gpsButton, detectandoCiudad && styles.botonDisabled]}
+              onPress={() => detectarCiudadPorGps()}
+              disabled={detectandoCiudad}
+              activeOpacity={0.85}
+            >
+              {detectandoCiudad ? <ActivityIndicator size="small" color="#FFFFFF" /> : <Text style={styles.gpsButtonText}>Actualizar ubicación</Text>}
+            </TouchableOpacity>
+          </>
+        )}
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Configuración de activación</Text>
+        <Text style={styles.sectionTitle}>Activación</Text>
 
         <Text style={styles.label}>Tipo de Activación</Text>
         <Picker
@@ -831,55 +901,61 @@ export default function FormularioActivacion({
           </>
         )}
 
-        <Text style={styles.label}>Ciudad de Activación</Text>
-        {isConnected === false ? (
-          <Picker
-            selectedValue={formulario.ciudad_activacion}
-            onValueChange={(v) => {
-              actualizarCampo('ciudad_activacion', v);
-              actualizarCampo('zona_activacion', '');
-            }}
-            style={styles.picker}
-          >
-            <Picker.Item label="Seleccionar..." value="" />
-            {CIUDADES.map(item => (
-              <Picker.Item key={item.key} label={item.label} value={item.key} />
-            ))}
-          </Picker>
-        ) : (
-          <View style={styles.gpsCityBox}>
-            <Text style={styles.gpsCityText}>
-              {ciudadLabel
-                ? `Detectada por GPS: ${ciudadLabel}`
-                : 'Detectando ciudad por GPS...'}
-            </Text>
-            <TouchableOpacity
-              style={[styles.gpsButton, detectandoCiudad && styles.botonDisabled]}
-              onPress={() => detectarCiudadPorGps()}
-              disabled={detectandoCiudad}
-              activeOpacity={0.85}
-            >
-              {detectandoCiudad ? (
-                <ActivityIndicator size="small" color="#FFFFFF" />
-              ) : (
-                <Text style={styles.gpsButtonText}>Actualizar ubicación</Text>
-              )}
-            </TouchableOpacity>
-          </View>
+        {esTiendaBarrio && (
+          <>
+            <Text style={styles.label}>Tipo de tienda</Text>
+            <Picker selectedValue={formulario.tipo_tienda} onValueChange={(v) => actualizarCampo('tipo_tienda', v)} style={styles.picker}>
+              <Picker.Item label="Seleccionar..." value="" />
+              {TAMANOS_TIENDA.map((item) => <Picker.Item key={item} label={item} value={item} />)}
+            </Picker>
+          </>
         )}
 
-        <Text style={styles.label}>Zona de Activación</Text>
-        <Picker
-          selectedValue={formulario.zona_activacion}
-          onValueChange={(v) => actualizarCampo('zona_activacion', v)}
-          style={styles.picker}
-          enabled={!!formulario.ciudad_activacion}
-        >
-          <Picker.Item label="Seleccionar..." value="" />
-          {zonasDisponibles.map(z => (
-            <Picker.Item key={z} label={z} value={z} />
-          ))}
-        </Picker>
+        {esComercio && (
+          <>
+            <Text style={styles.label}>Rubro del comercio</Text>
+            <Picker selectedValue={formulario.rubro_comercio} onValueChange={(v) => setFormulario((prev) => ({ ...prev, rubro_comercio: v, rubro_comercio_otro: v === 'Otro' ? prev.rubro_comercio_otro : '' }))} style={styles.picker}>
+              <Picker.Item label="Seleccionar..." value="" />
+              {RUBROS_COMERCIO.map((item) => <Picker.Item key={item} label={item} value={item} />)}
+            </Picker>
+            {formulario.rubro_comercio === 'Otro' && <TextInput style={styles.input} placeholder="Especifica el rubro" value={formulario.rubro_comercio_otro} onChangeText={(v) => actualizarCampo('rubro_comercio_otro', v)} />}
+            <Text style={styles.label}>¿Comercio fuera del mercado?</Text>
+            <Picker selectedValue={formulario.comercio_fuera_mercado} onValueChange={(v) => actualizarCampo('comercio_fuera_mercado', v)} style={styles.picker}>
+              <Picker.Item label="Seleccionar..." value={null} />
+              <Picker.Item label="Sí" value={true} />
+              <Picker.Item label="No" value={false} />
+            </Picker>
+          </>
+        )}
+
+        {zonasDisponibles.length > 1 && (
+          <>
+            <Text style={styles.label}>Zona de Activación</Text>
+            <Picker
+              selectedValue={formulario.zona_activacion}
+              onValueChange={(v) => actualizarCampo('zona_activacion', v)}
+              style={styles.picker}
+              enabled={!!formulario.ciudad_activacion}
+            >
+              <Picker.Item label="Seleccionar..." value="" />
+              {zonasDisponibles.map((zona) => <Picker.Item key={zona} label={zona} value={zona} />)}
+            </Picker>
+          </>
+        )}
+        <Text style={styles.label}>Plaza asignada</Text>
+        {plazasTemporales.length === 0 ? (
+          <View style={styles.fixedPlaza}>
+            <Text style={styles.plazaTag}>Base</Text>
+            <Text style={styles.fixedPlazaText}>{usuario.plaza || 'No especificada'}</Text>
+          </View>
+        ) : (
+          <Picker selectedValue={plazaSeleccionada} onValueChange={onPlazaChange} style={styles.picker}>
+            <Picker.Item label={`Base · ${usuario.plaza || 'No especificada'}`} value="base" />
+            {plazasTemporales.map((plaza) => (
+              <Picker.Item key={plaza.id} label={`Temporal · ${plaza.nombre}`} value={`temporal:${plaza.id}`} color={colors.warning} />
+            ))}
+          </Picker>
+        )}
       </View>
 
       <View style={styles.card}>
@@ -943,13 +1019,18 @@ export default function FormularioActivacion({
           <Text style={styles.switchLabel}>¿HUBO ERROR?</Text>
           <Switch
             value={formulario.hubo_error}
-            onValueChange={(v) => actualizarCampo('hubo_error', v)}
+            onValueChange={(v) => setFormulario((prev) => ({ ...prev, hubo_error: v, tipo_error: v ? prev.tipo_error : '', descripcion_error: v ? prev.descripcion_error : '' }))}
             trackColor={{ false: colors.inputBorder, true: colors.warning }}
           />
         </View>
 
         {formulario.hubo_error && (
           <>
+            <Text style={styles.label}>Tipo de error</Text>
+            <Picker selectedValue={formulario.tipo_error} onValueChange={(v) => setFormulario((prev) => ({ ...prev, tipo_error: v, descripcion_error: v === 'Otro' ? prev.descripcion_error : '' }))} style={styles.picker}>
+              <Picker.Item label="Seleccionar..." value="" />
+              {TIPOS_ERROR.map((item) => <Picker.Item key={item} label={item} value={item} />)}
+            </Picker>
             <Text style={styles.label}>Descripción del error</Text>
             <TextInput
               value={formulario.descripcion_error}
@@ -963,7 +1044,7 @@ export default function FormularioActivacion({
       {requiereFotos ? (
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Fotografías</Text>
-          <Text style={styles.label}>Foto de evidencia (QR/Comercio)</Text>
+          <Text style={styles.label}>Foto de comprobación (obligatoria)</Text>
           <TouchableOpacity
             onPress={() => tomarFoto(setFotoPrincipal, 'foto_url')}
             style={[styles.botonMini, { backgroundColor: colors.primary, ...botonShadow }]}
@@ -972,6 +1053,13 @@ export default function FormularioActivacion({
             <Text style={styles.botonTextoMini}>Tomar Foto</Text>
           </TouchableOpacity>
           {fotoPrincipal ? <Image source={{ uri: fotoPrincipal }} style={styles.imagenMiniatura} /> : null}
+          {fotoPrincipal ? <TouchableOpacity onPress={() => eliminarFoto(setFotoPrincipal, 'foto_url')} style={styles.botonMini}><Text style={styles.botonTextoMini}>Eliminar foto principal</Text></TouchableOpacity> : null}
+          <Text style={styles.label}>Foto Cash-In (obligatoria)</Text>
+          <TouchableOpacity onPress={() => tomarFoto(setFotoCashIn, 'foto_cash_in')} style={[styles.botonMini, { backgroundColor: colors.primary, ...botonShadow }]}>
+            <Text style={styles.botonTextoMini}>{fotoCashIn ? 'Reemplazar Foto Cash-In' : 'Tomar Foto Cash-In'}</Text>
+          </TouchableOpacity>
+          {fotoCashIn ? <Image source={{ uri: fotoCashIn }} style={styles.imagenMiniatura} /> : null}
+          {fotoCashIn ? <TouchableOpacity onPress={() => eliminarFoto(setFotoCashIn, 'foto_cash_in')} style={styles.botonMini}><Text style={styles.botonTextoMini}>Eliminar Foto Cash-In</Text></TouchableOpacity> : null}
         </View>
       ) : null}
 
@@ -1015,6 +1103,7 @@ const styles = StyleSheet.create({
   heroMetaRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     marginTop: spacing.sm,
   },
   badge: {
@@ -1022,6 +1111,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: 8,
     marginRight: spacing.sm,
+    marginBottom: spacing.xs,
   },
   badgePrimary: {
     backgroundColor: 'rgba(23, 105, 255, 0.3)',
@@ -1049,6 +1139,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.08,
     shadowRadius: 8,
     elevation: 3,
+  },
+  compactCard: {
+    paddingVertical: spacing.sm,
   },
   titulo: {
     fontSize: fontSizes.xlarge,
@@ -1117,6 +1210,40 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: fontSizes.small,
     fontWeight: '700',
+  },
+  locationStatus: {
+    color: colors.primaryDark,
+    fontSize: fontSizes.small,
+    fontWeight: '700',
+    marginBottom: spacing.xs,
+  },
+  locationSummary: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: spacing.xs,
+  },
+  fixedPlaza: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    padding: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  plazaTag: {
+    color: colors.primary,
+    fontSize: fontSizes.small,
+    fontWeight: '700',
+    marginRight: spacing.sm,
+  },
+  fixedPlazaText: {
+    flex: 1,
+    color: colors.text,
+    fontSize: fontSizes.small,
+    fontWeight: '600',
   },
   helperRow: {
     flexDirection: 'row',

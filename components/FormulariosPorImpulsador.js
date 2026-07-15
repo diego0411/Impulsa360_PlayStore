@@ -25,6 +25,7 @@ export default function FormulariosPorImpulsador({ usuario }) {
   const [detalle, setDetalle] = useState(null);
   const [detalleLoading, setDetalleLoading] = useState(false);
   const [detalleFotoUrl, setDetalleFotoUrl] = useState('');
+  const [detalleFotoCashInUrl, setDetalleFotoCashInUrl] = useState('');
 
   const pageRef = useRef(0);
   const channelRef = useRef(null);
@@ -191,6 +192,7 @@ export default function FormulariosPorImpulsador({ usuario }) {
       setDetalleLoading(true);
       setDetalle(null);
       setDetalleFotoUrl('');
+      setDetalleFotoCashInUrl('');
       setDetalleVisible(true);
 
       const fotoRaw = item?.foto_url || '';
@@ -199,6 +201,9 @@ export default function FormulariosPorImpulsador({ usuario }) {
       if (esLocal) {
         setDetalle(item);
         setDetalleFotoUrl(fotoEsLocal ? fotoRaw : '');
+        const cashInRaw = item?.foto_cash_in || '';
+        const cashInEsLocal = /^(file|content):\/\//i.test(String(cashInRaw));
+        setDetalleFotoCashInUrl(cashInEsLocal ? cashInRaw : await resolverUrlDeFoto(cashInRaw));
         return;
       }
 
@@ -215,8 +220,9 @@ export default function FormulariosPorImpulsador({ usuario }) {
         return;
       }
 
-      const fotoUrl = await resolverUrlDeFoto(data?.foto_url);
+      const [fotoUrl, fotoCashInUrl] = await Promise.all([resolverUrlDeFoto(data?.foto_url), resolverUrlDeFoto(data?.foto_cash_in)]);
       setDetalleFotoUrl(fotoUrl);
+      setDetalleFotoCashInUrl(fotoCashInUrl);
       setDetalle(data);
     } catch (e) {
       console.error('❌ Detalle catch:', e);
@@ -231,6 +237,7 @@ export default function FormulariosPorImpulsador({ usuario }) {
     setDetalleVisible(false);
     setDetalle(null);
     setDetalleFotoUrl('');
+    setDetalleFotoCashInUrl('');
   };
 
   const renderItem = ({ item }) => {
@@ -334,6 +341,12 @@ export default function FormulariosPorImpulsador({ usuario }) {
                     style={[styles.foto, { height: fotoHeight }]}
                   />
                 )}
+                {!!detalleFotoCashInUrl && (
+                  <>
+                    <Text style={styles.itemMeta}>Foto Cash-In</Text>
+                    <Image source={{ uri: detalleFotoCashInUrl }} style={[styles.foto, { height: Math.min(fotoHeight, 160) }]} resizeMode="cover" />
+                  </>
+                )}
 
                 {/* Campos principales */}
                 {renderCampo('Fecha', (detalle.fecha_activacion || detalle.creado_en || detalle.created_at || '').toString().slice(0,10))}
@@ -341,11 +354,16 @@ export default function FormulariosPorImpulsador({ usuario }) {
                 {renderCampo('Reactivación comercio', booleanPretty(!!detalle.es_reactivacion || !!detalle.reactivacion_comercio))}
                 {renderCampo('Tipo de comercio', detalle.tipo_comercio)}
                 {renderCampo('Tamaño de tienda', detalle.tamano_tienda)}
+                {renderCampo('Tipo de tienda', detalle.tipo_tienda)}
+                {renderCampo('Rubro de comercio', detalle.rubro_comercio)}
+                {renderCampo('Otro rubro', detalle.rubro_comercio_otro)}
+                {renderCampo('Comercio fuera del mercado', detalle.comercio_fuera_mercado == null ? null : booleanPretty(detalle.comercio_fuera_mercado))}
                 {renderCampo('Cliente', [detalle.nombres_cliente, detalle.apellidos_cliente].filter(Boolean).join(' ').trim())}
                 {renderCampo('CI', detalle.ci_cliente)}
                 {renderCampo('Teléfono', detalle.telefono_cliente)}
                 {renderCampo('Email', detalle.email_cliente)}
                 {renderCampo('Plaza', detalle.plaza)}
+                {renderCampo('Plaza temporal', detalle.es_plaza_temporal ? detalle.plaza_temporal : null)}
                 {renderCampo('Impulsador', detalle.impulsador)}
 
                 {/* Flags */}
@@ -357,6 +375,7 @@ export default function FormulariosPorImpulsador({ usuario }) {
                 {renderCampo('QR físico', booleanPretty(detalle.qr_fisico))}
                 {renderCampo('Respaldo', booleanPretty(detalle.respaldo))}
                 {renderCampo('¿Hubo error?', booleanPretty(detalle.hubo_error))}
+                {!!detalle.hubo_error && renderCampo('Tipo de error', detalle.tipo_error)}
                 {!!detalle.hubo_error && renderCampo('Descripción de error', detalle.descripcion_error)}
 
                 {/* Ubicación */}

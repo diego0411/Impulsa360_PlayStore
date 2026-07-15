@@ -18,6 +18,7 @@ import { supabase } from './lib/supabase';
 import { HAS_SUPABASE_CONFIG, SUPABASE_CONFIG_ERROR } from './lib/config';
 import { colors, spacing, fontSizes } from './styles/theme';
 import { normalizarNombreVisible } from './lib/identity';
+import { obtenerPlazasTemporales } from './lib/plazasTemporales';
 import AuthScreen from './components/AuthScreen';
 import LaunchIntroScreen from './components/LaunchIntroScreen';
 import FormularioActivacion from './components/FormularioActivacion';
@@ -98,6 +99,14 @@ export default function App() {
         'qr_fisico',
         'hubo_error',
         'descripcion_error',
+        'tipo_error',
+        'foto_cash_in',
+        'tipo_tienda',
+        'rubro_comercio',
+        'rubro_comercio_otro',
+        'comercio_fuera_mercado',
+        'es_plaza_temporal',
+        'plaza_temporal',
         'tipo_activacion',
         'base_activacion',
         'es_reactivacion',
@@ -111,6 +120,7 @@ export default function App() {
         'respaldo',
         'ciudad_activacion',
         'zona_activacion',
+        'plaza',
         'estado_sync',
         'dispositivo',
       ];
@@ -120,7 +130,7 @@ export default function App() {
         const localId = f._id_local ?? f.id;
 
         // Clonamos para no mutar el original
-        const { id: _omit, _id_local, _created_at, _updated_at, _sync, ...formulario } = f;
+        const { _id_local, _created_at, _updated_at, _sync, ...formulario } = f;
 
         // Asegura id UUID estable
         const recordId = (formulario.id && typeof formulario.id === 'string' && formulario.id.length > 20)
@@ -137,8 +147,13 @@ export default function App() {
         // Limpia campos que no existan en la tabla
         delete formulario.fecha_hora;
 
+        if (!formulario.foto_url || !formulario.foto_cash_in) {
+          errores.push(`ID local ${localId}: Faltan las dos fotos obligatorias.`);
+          continue;
+        }
+
         // Sube imágenes pendientes
-        const fotoKeys = ['foto_url'];
+        const fotoKeys = ['foto_url', 'foto_cash_in'];
         let fotoUploadFailed = false;
         for (const key of fotoKeys) {
           const fotoLocalUri = formulario[key];
@@ -148,10 +163,11 @@ export default function App() {
             if (!fileInfo?.exists) {
               errores.push(`ID local ${localId}: La foto (${key}) ya no está en el dispositivo. Debes tomarla nuevamente.`);
               fotoUploadFailed = true;
-              break;
+              continue;
             }
             try {
-              const path = `activaciones/${recordId}.jpg`;
+              const fileName = key === 'foto_cash_in' ? 'cash-in.jpg' : 'principal.jpg';
+              const path = `activaciones/${usuario.id}/${recordId}/${fileName}`;
               const storagePath = await subirImagenASupabase(fotoLocalUri, path);
               if (storagePath) {
                 formulario[key] = storagePath;
@@ -161,13 +177,13 @@ export default function App() {
               } else {
                 errores.push(`ID local ${localId}: No se pudo subir la foto (${key})`);
                 fotoUploadFailed = true;
-                break;
+                continue;
               }
             } catch (e) {
               console.warn(`⚠️ No se pudo subir foto (${key}) del formulario ${localId}:`, e?.message || e);
               errores.push(`ID local ${localId}: No se pudo subir la foto (${key})`);
               fotoUploadFailed = true;
-              break;
+              continue;
             }
           }
         }
@@ -188,7 +204,7 @@ export default function App() {
           id: recordId,
           usuario_id: usuario?.id,
           impulsador: nombreImpulsador || payload.impulsador || usuario?.email || '',
-          plaza: usuario?.plaza,
+          plaza: payload.plaza || usuario?.plaza,
           estado_sync: 'online',
         };
 
@@ -297,12 +313,17 @@ export default function App() {
         const nombreMetadata = normalizarNombreVisible(user.user_metadata?.nombre || '');
         const plazaPerfil = normalizarNombreVisible(perfil?.plaza || '');
         const plazaCache = normalizarNombreVisible(cacheMismoUsuario?.plaza || '');
+        const plazasTemporales = await obtenerPlazasTemporales({
+          activadorId: perfil?.usuario_id,
+          usuarioId: user.id,
+        });
 
         const usuarioFinal = {
           id: user.id,
           email: user.email,
           nombre: nombrePerfil || nombreCache || nombreMetadata || user.email,
           plaza: plazaPerfil || plazaCache || 'No especificada',
+          plazas_temporales: plazasTemporales,
         };
 
         setUsuario(usuarioFinal);
